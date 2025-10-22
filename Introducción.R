@@ -1,5 +1,4 @@
 # Preparatorio ------------------------------------------------------------
-setwd("C:/Users/kenny/Desktop/Cursos PEAM/Modelación basada en agentes")
 pacman::p_load(ABM, tidyverse) # Carga el paquete ABM: define simulaciones basadas en agentes.
 set.seed(1) # Fijamos la semilla para que los resultados sean reproducibles.
 
@@ -85,3 +84,4 @@ p <- ggplot(res, aes(x = times, y = attend)) +
   theme_minimal(base_size = 14)
 
 p
+
