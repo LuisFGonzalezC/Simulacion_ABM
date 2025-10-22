@@ -1,0 +1,146 @@
+# =========================
+# 0) Paquetes y semilla
+# =========================
+library(ABM)        # Carga el paquete ABM: define Simulation, Event, counters, etc.
+set.seed(1)         # Fija la semilla para que los resultados sean reproducibles
+
+# =========================
+# 1) Parámetros del modelo
+# =========================
+N      <- 5000     # Número de hogares (cada uno es un "agente")
+Tmax   <- 36       # Número de meses (ticks) a simular
+transfer_amount <- 600           # Monto nominal mensual del programa ($600)
+delay_prob_base <- 0.30          # Probabilidad de retraso del pago (30%). Cred inicial = 1 - 0.30 = 0.70
+lambda_cred     <- 0.30          # Qué tan rápido "aprende" la credibilidad (promedio móvil). 
+# Si crees que los hogares ajustan rápido su expectativa (mucha atención a la experiencia reciente), usa lamba más alto
+
+# =====================================
+# 2) Crear simulación y estado inicial
+# =====================================
+# En ABM, el "estado" principal del agente será un string: "A" (asiste) o "N" (no asiste).
+# Además guardamos atributos por agente: 
+#   - theta: umbral individual de decisión
+#   - cred:  credibilidad percibida de cobrar a tiempo (entre 0 y 1).
+
+sim <- Simulation$new(N) # Crea una simulación con N agentes (IDs 1..N ya existen internamente)
+
+seedA <- 10  # Cantidad de hogares que ya comienzan asistiendo en t=0
+for (i in 1:N) {    # Recorremos todos los agentes para fijar su estado inicial
+  theta <- rnorm(1, mean = 300, sd = 80)     # Umbral heterogéneo ~ Normal(300, 80)
+  cred0 <- 1 - delay_prob_base               # Credibilidad inicial (ej.: 0.70)
+  # Nuevo: probabilidad de tener empleo
+  # trabaja <- runif(1) < 0.40   # 40% de los hogares trabajan (TRUE/FALSE)
+  state0 <- if (i <= seedA) "A" else "N"      # Primeros 'seedA' agentes arrancan en "A", el resto "N"
+  sim$setState(i, list(state0, theta = theta, cred = cred0))  
+  # o cambiar si trabaja por   sim$setState(i, list(state0, theta = theta, cred = cred0, trabaja = trabaja))
+}
+# setState(indice, lista): 
+#   - el primer elemento de la lista es el ESTADO ("A"/"N")
+#   - el resto son atributos nombrados que viajan con el agente
+# fija el estado del agente i como el primer elemento de la lista (A/N) 
+# y guarda atributos nombrados (theta, cred, etc.). 
+
+# ======================================
+# 3) Loggers (contadores automáticos)
+# ======================================
+# newCounter(nombre, desde): crea un contador que, en cada tick, cuenta cuántos agentes
+# están en un cierto estado "desde". 
+# Aquí contamos cuántos están en "A" y cuántos en "N" en cada tiempo.
+sim$addLogger(newCounter("A", "A"))  # cuántos asisten
+sim$addLogger(newCounter("N", "N"))  # cuántos no asisten
+
+# =========================================================
+# 4) Handler mensual (la “dinámica” que corre cada mes)
+# ========================================================
+# ABM dispara funciones "handler" programadas como eventos. 
+# La firma SIEMPRE es: function(time, sim, agent)
+#   - time : tiempo actual (mes)
+#   - sim  : el objeto simulación (para leer/escribir estados)
+#   - agent: el agente al que se programó el evento (usaremos sim$get para re-agendar)
+
+tick_handler <- function(time, sim, agent) {   # Recorremos TODOS los agentes y actualizamos su estado de este mes
+  for (i in 1:N) {
+    ai <- getAgent(sim, i)           # Obtiene el agente i
+    st <- getState(ai)               # st[[1]] es "A" o "N"; luego atributos
+    
+    # Beneficio esperado este mes: monto * credibilidad percibida
+    benefit   <- transfer_amount * st$cred
+    
+    # Si trabaja correr en lugar de regla de decisión mínima
+# if (st$trabaja) {
+#   new_state <- "N"  # Si trabaja, no asiste
+# } else {
+#  new_state <- if (benefit >= st$theta) "A" else "N"
+# }
+    
+    # Regla de decisión mínima:
+    #   Asiste si el beneficio esperado supera su umbral theta
+    new_state <- if (benefit >= st$theta) "A" else "N"
+    
+    # Si asiste, “experimento” de pago a tiempo (Bernoulli con p = 1 - delay_prob_base)
+    paid_on_time <- (new_state == "A") && (runif(1) > delay_prob_base)
+    
+    # Actualizar credibilidad (promedio móvil)
+    cred_new <- (1 - lambda_cred) * st$cred + lambda_cred * as.numeric(paid_on_time)
+    
+    # Guardamos nuevo estado + atributos (con el theta que no cambia)
+    # o ejecutamos trabajo
+    # setState(ai, list(new_state, theta = st$theta, cred = cred_new, trabaja = st$trabaja))
+    setState(ai, list(new_state, theta = st$theta, cred = cred_new))
+  }
+  
+  # Re-agendar el mismo handler para el mes siguiente, hasta Tmax
+  # Usamos 'agent' (puntero del propio Simulation) como contenedor del evento recurrente
+  if (time < Tmax) schedule(agent, newEvent(time + 1, tick_handler))
+}
+
+# runif(1) genera un número aleatorio uniforme entre 0 y 1. Por ejemplo, puede salir 0.13, 0.72, 0.99, etc.
+# delay_prob_base es la probabilidad de que el pago se retrase, o sea falle.
+# delay_prob_base <- 0.30 = 30% de probabilidad de retraso (y por tanto 70% de que llegue a tiempo).
+
+# runif(1) > delay_prob_base significa: “el número aleatorio fue mayor que 0.3”.
+# Si runif(1) = 0.72  TRUE (pago a tiempo)
+# Si runif(1) = 0.18  FALSE (pago tarde)
+
+# (new_state == "A") && (...) asegura que solo “tire la moneda” si el hogar asistió este mes.
+# Si no asistió, no se evalúa pago alguno (porque no fue al punto de cobro, por ejemplo).
+
+# cred_new <- (1 - lambda_cred) * st$cred + lambda_cred * as.numeric(paid_on_time)
+# es una fórmula de promedio móvil exponencial:
+# si el pago fue a tiempo (paid_on_time = TRUE = 1), la credibilidad sube hacia 1.
+# Si fue tarde (FALSE = 0), baja hacia 0.
+# lambda_cred = 0.3 controla qué tan rápido se mueve la credibilidad:
+# 0.1 = se mueve lento, olvida poco.
+# 0.3 = se mueve moderado.
+# 0.8 = se mueve rápido, más “emocional”.
+
+# ==============================
+# 5) Ejecutar la simulación
+# ==============================
+# Programamos el primer “tick” en t = 0 sobre la entidad 'sim$get' (el agente "Simulación")
+schedule(sim$get, newEvent(0, tick_handler))
+
+# sim$run(0:Tmax) avanza la simulación y devuelve un data.frame con:
+#   - columna temporal (times)
+#   - columnas de cada logger (A, N)
+res <- sim$run(0:Tmax)     # data.frame con columnas: time, A, N
+
+# Creamos una columna con la proporción que asiste (A/N total)
+res$attend <- res$A / N
+
+# ==============================
+# 6) Gráfico
+# ==============================
+library(ggplot2)
+
+p <- ggplot(res, aes(x = times, y = attend)) +
+  geom_area(fill = "yellow2", alpha = 0.12) +
+  geom_line(size = 1.4, color = "orange", lineend = "round") +
+  coord_cartesian(ylim = c(0, 1)) +
+  labs(title = "CCT (umbral + credibilidad)", x = "Mes", y = "% que asiste") +
+  theme_minimal(base_size = 14)
+
+p
+
+# guarda en PNG
+ggsave("asistencia_cct.png", plot = p, width = 8, height = 5, dpi = 300)
